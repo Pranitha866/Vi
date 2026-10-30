@@ -1,29 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const HINT = "Tap a part of the diagram to learn about it.";
+const BAND = ["#1b2a3d", "#1f3347", "#243b52", "#294360"];
 
 // Works out the path length and where each step sits along the path
 function geometry(d) {
   const ns = d.nodes;
+  const open = !!d.open; // open path = does not loop back to the start
   const pts = d.pts || ns.map((n) => [n.x, n.y]);
-  const segs = pts.map((p, i) => {
-    const m = pts[(i + 1) % pts.length];
-    return Math.hypot(m[0] - p[0], m[1] - p[1]);
-  });
-  const total = segs.reduce((a, b) => a + b, 0);
+  const count = open ? pts.length - 1 : pts.length;
+  const segs = [];
+  for (let i = 0; i < count; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    segs.push(Math.hypot(b[0] - a[0], b[1] - a[1]));
+  }
+  const total = segs.reduce((a, b) => a + b, 0) || 1;
   const at = [0];
   let run = 0;
   segs.forEach((s) => { run += s; at.push(run / total); });
-  const cum = ns.map((n, i) => at[n.p !== undefined ? n.p : i]);
-  const pathD = pts.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join("") + "Z";
-  return { pts, segs, total, cum, pathD };
+  const scale = open ? 0.9 : 1;
+  const cum = ns.map((n, i) => (at[n.p !== undefined ? n.p : i] || 0) * scale);
+  const pathD = pts.map((p, i) => (i ? "L" : "M") + p[0] + " " + p[1]).join("") + (open ? "" : "Z");
+  return { pts, segs, total, cum, pathD, open, scale };
 }
 
-// Finds the (x, y) of the moving dot for a fraction 0..1 of the path
-function pointAt(g, frac) {
+// Finds the (x, y) of the moving dot at time t (0..1)
+function pointAt(g, t) {
+  const frac = g.open ? Math.min(1, t / g.scale) : t;
   let target = frac * g.total;
-  for (let i = 0; i < g.pts.length; i++) {
-    if (target <= g.segs[i] || i === g.pts.length - 1) {
+  for (let i = 0; i < g.segs.length; i++) {
+    if (target <= g.segs[i] || i === g.segs.length - 1) {
       const a = g.pts[i];
       const b = g.pts[(i + 1) % g.pts.length];
       const k = g.segs[i] ? Math.min(1, target / g.segs[i]) : 0;
@@ -34,9 +41,52 @@ function pointAt(g, frac) {
   return { x: g.pts[0][0], y: g.pts[0][1] };
 }
 
+// Draws the nodes of AI topics. Each layout looks different.
+function Shapes({ d }) {
+  const ns = d.nodes;
+  const lay = d.layout;
+
+  if (lay === "layers") {
+    return ns.map((n, i) => (
+      <g key={n.l + i}>
+        <rect x="40" y={n.y - 24} width="320" height="48" rx="10" fill={BAND[i % 4]} stroke="#22303f" />
+        <text x="62" y={n.y + 8} textAnchor="middle" style={{ fontSize: "22px" }}>{n.icon}</text>
+        <text x="90" y={n.y + 4} style={{ fontSize: "12px" }}>{n.l}</text>
+      </g>
+    ));
+  }
+
+  const labelDy = (i) => ((lay === "cycle" || lay === "tree") && i === 0 ? -34 : 42);
+
+  return (
+    <>
+      {lay === "flow" &&
+        [0, 1, 2].map((i) => {
+          const mx = (ns[i].x + ns[i + 1].x) / 2;
+          const y = ns[i].y;
+          return (
+            <polygon key={"ar" + i} points={`${mx - 6},${y - 6} ${mx + 6},${y} ${mx - 6},${y + 6}`} fill="#8a93a6" />
+          );
+        })}
+      {lay === "cycle" && (
+        <text x="200" y="129" textAnchor="middle" style={{ fontSize: "13px", fontWeight: 700 }}>
+          {d.center || ""}
+        </text>
+      )}
+      {ns.map((n, i) => (
+        <g key={n.l + i}>
+          <circle cx={n.x} cy={n.y} r="24" fill="#111923" stroke="#8a93a6" strokeWidth="3" />
+          <text x={n.x} y={n.y + 8} textAnchor="middle" style={{ fontSize: "22px" }}>{n.icon}</text>
+          <text x={n.x} y={n.y + labelDy(i)} textAnchor="middle" style={{ fontSize: "11px" }}>{n.l}</text>
+        </g>
+      ))}
+    </>
+  );
+}
+
 export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
   const g = useMemo(() => geometry(d), [d]);
-  const [t, setT] = useState(0);        // dot position along the path (0..1)
+  const [t, setT] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [info, setInfo] = useState(HINT);
   const tRef = useRef(0);
@@ -44,7 +94,6 @@ export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
   const svgRef = useRef(null);
   speedRef.current = speed;
 
-  // Jump to a step
   function go(i) {
     const n = g.cum.length;
     const a = (i + n) % n;
@@ -86,6 +135,7 @@ export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
   }, [playing, d]);
 
   const pos = pointAt(g, t);
+  const hidePath = d.deco || d.layout === "layers";
 
   return (
     <section>
@@ -94,22 +144,19 @@ export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
         <path
           d={g.pathD}
           fill="none"
-          className={d.deco ? undefined : "wire"}
-          stroke={d.deco ? "none" : undefined}
+          className={hidePath ? undefined : "wire"}
+          stroke={hidePath ? "none" : undefined}
         />
 
         {d.deco ? (
           <g dangerouslySetInnerHTML={{ __html: d.deco }} />
+        ) : d.layout ? (
+          <Shapes d={d} />
         ) : (
           d.nodes.map((n) => (
             <g key={n.l}>
               <circle cx={n.x} cy={n.y} r="16" fill="#111923" stroke="#8a93a6" strokeWidth="3" />
-              <text
-                x={n.x}
-                y={n.y + (n.y < 130 ? -24 : 34)}
-                textAnchor="middle"
-                style={{ fontSize: "13px" }}
-              >
+              <text x={n.x} y={n.y + (n.y < 130 ? -24 : 34)} textAnchor="middle" style={{ fontSize: "13px" }}>
                 {n.l}
               </text>
             </g>
@@ -122,7 +169,7 @@ export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
           const cw = Math.max(w, 50);
           const ch = Math.max(h, 50);
           return (
-            <g key={"hit" + n.l}>
+            <g key={"hit" + n.l + i}>
               {i === act && (
                 <rect className="hl" x={n.x - w / 2} y={n.y - h / 2} width={w} height={h} rx="10" />
               )}
@@ -144,28 +191,20 @@ export default function Diagram({ d, L, act, setAct, playing, setPlaying }) {
 
       <div className="dots">
         {d.nodes.map((n, i) => (
-          <i key={n.l} className={i === act ? "on" : ""} onClick={() => go(i)} />
+          <i key={n.l + i} className={i === act ? "on" : ""} onClick={() => go(i)} />
         ))}
       </div>
 
       <div className="ctl">
-        <button disabled={act === 0} onClick={() => { setPlaying(false); go(act - 1); }}>
-          Back
-        </button>
-        <button className="go" onClick={() => setPlaying(!playing)}>
-          {playing ? "Pause" : "Play"}
-        </button>
+        <button disabled={act === 0} onClick={() => { setPlaying(false); go(act - 1); }}>Back</button>
+        <button className="go" onClick={() => setPlaying(!playing)}>{playing ? "Pause" : "Play"}</button>
         <button onClick={() => { setPlaying(false); go(act + 1); }}>Next</button>
       </div>
 
       <div className="spd">
         Speed
         <input
-          type="range"
-          min="0.5"
-          max="3"
-          step="0.5"
-          value={speed}
+          type="range" min="0.5" max="3" step="0.5" value={speed}
           onChange={(e) => setSpeed(+e.target.value)}
         />
         <b>{speed}x</b>
